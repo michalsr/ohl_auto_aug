@@ -29,6 +29,7 @@ class CIFAR10(data.Dataset):
         self.train = train
         self.test = test
         self.augmentations = augmentations
+        self.augmentation_list = self.make_aug_dict()
         self.data = []
         self.labels = []
         
@@ -62,7 +63,7 @@ class CIFAR10(data.Dataset):
         #apply previous transforms 
         #apply img augs
         #apply cutout
-        MEAN, STD = ((0.485, 0.456, 0.406), (0.229, 0.224, 0.225))
+        MEAN, STD = ((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010))
         t=  transforms.Compose([
         transforms.RandomCrop(32, padding=4),
         transforms.RandomHorizontalFlip(),
@@ -73,13 +74,9 @@ class CIFAR10(data.Dataset):
     ])
         return t(img) 
     def normal_transform(self,img):
-        MEAN, STD = ((0.485, 0.456, 0.406), (0.229, 0.224, 0.225))
+        MEAN, STD = ((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010))
         t=  transforms.Compose([
-        transforms.RandomCrop(32, padding=4),
-
-
-        transforms.ToTensor(),
-   
+        transforms.ToTensor(),   
         transforms.Normalize(MEAN, STD),
     ])
         return t(img) 
@@ -102,13 +99,26 @@ class CIFAR10(data.Dataset):
   
         return img, target
     def get_custom_augs(self,augs):
-        aug_1,aug_2 = augs 
+        aug_1,aug_2 = self.augmentation_list[augs]
+       
+        return aug_1,aug_2
+    def make_aug_dict(self):
+   
         aug_dict={0:ShearX(0.1),1:ShearX(0.2),2:ShearX(0.3),3:ShearY(0.1),4:ShearY(0.2),5:ShearY(0.3),6:TranslateX(0.15),
         7:TranslateX(0.3),8:TranslateX(0.45),9:TranslateY(0.15),10:TranslateY(0.3),11:TranslateY(0.45),12:Rotate(10),
         13:Rotate(20),14:Rotate(30),15:Color(0.3),16:Color(0.6),17:Color(0.9),18:Posterize(4),19:Posterize(5),20:Posterize(8),21:Solarize(26),22:Solarize(102),23:Solarize(179),
         24:Contrast(1.3),25:Contrast(1.6),26:Contrast(1.9),27:Sharpness(1.3),28:Sharpness(1.6),29:Sharpness(1.9),30:Brightness(1.3),31:Brightness(1.6),32:Brightness(1.9),
         33:AutoContrast(),34:Equalize(),35:Invert()}
-        return aug_dict[aug_1],aug_dict[aug_2]
+        index_start = 0
+        final_dict = {}
+        for k_1 in aug_dict.keys():
+            for k_2 in aug_dict.keys():
+                final_dict[index_start] = (aug_dict[k_1],aug_dict[k_2])
+                index_start += 1 
+        return final_dict 
+
+                
+
 
 
     
