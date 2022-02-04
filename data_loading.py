@@ -37,7 +37,7 @@ class CIFAR10(data.Dataset):
         #take 
         if not test:
             for i in range(1,6):
-                with open(f'/home/michal/ohl_auto_aug/cifar-10-batches-py/data_batch_{i}', 'rb') as f:
+                with open(f'/shared/rsaas/michal5/ohl_auto_aug/cifar-10-batches-py/data_batch_{i}', 'rb') as f:
                     entry = pickle.load(f, encoding='latin1')
                     self.data.append(entry['data'])
                     if 'labels' in entry:
@@ -154,13 +154,13 @@ class CIFAR10Test(data.Dataset):
         #take 
         if not test:
             for i in range(1,6):
-                with open(f'/home/michal/ohl_auto_aug/cifar-10-batches-py/data_batch_{i}', 'rb') as f:
+                with open(f'/shared/rsaas/michal5/ohl_auto_aug/cifar-10-batches-py/data_batch_{i}', 'rb') as f:
                     entry = pickle.load(f, encoding='latin1')
                     self.data.append(entry['data'])
                     if 'labels' in entry:
                         self.labels.extend(entry['labels'])
         else:
-            with open(f'/home/michal/ohl_auto_aug/cifar-10-batches-py/test_batch', 'rb') as f:
+            with open(f'/shared/rsaas/michal5/ohl_auto_aug/cifar-10-batches-py/test_batch', 'rb') as f:
                 entry = pickle.load(f, encoding='latin1')
                 self.data.append(entry['data'])
                 if 'labels' in entry:

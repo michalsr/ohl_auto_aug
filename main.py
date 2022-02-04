@@ -123,67 +123,107 @@ class Weights(nn.Module):
     self.log_prob = []
     self.tensor_reward = []
     return loss.item()
-def test(dataset,best_model_path,logger):
-  correct = 0
-  total = 0
-  dataset.train=False 
-  dataset.test = True 
-  model,optim,sched = initialize_model(best_model_path,300)
-  test_loader = torch.utils.data.DataLoader(
-        dataset, batch_size=256, shuffle=True,
-        num_workers=2
-    )
-  model.cuda()
-  model.eval()
-  with torch.no_grad():
-    for data in tqdm(test_loader):
-        inputs, labels = data
-        # calculate outputs by running images through the network
-        inputs = inputs.cuda()
-        labels = labels.cuda()
-        outputs = model(inputs)
-        # the class with the highest energy is what we choose as prediction
-        _, predicted = torch.max(outputs.data, 1)
-        total += labels.size(0)
-        correct += (predicted == labels).sum().item()
-  logger.info(f'Acc: {correct/total}')
-  print(f'Acc:{correct/total}')
-  return correct/total 
-def val_trajec(dataset,val_sampler,model):
-  correct = 0
-  total = 0
-  dataset.train=False 
-  val_loader = torch.utils.data.DataLoader(
-        dataset, batch_size=256, sampler=val_sampler,
-        num_workers=2
-    )
-  model.cuda()
-  model.eval()
-  with torch.no_grad():
-    for data in val_loader:
-        inputs, labels = data
-        # calculate outputs by running images through the network
-        inputs = inputs.cuda()
-        labels = labels.cuda()
-        outputs = model(inputs)
-        # the class with the highest energy is what we choose as prediction
-        _, predicted = torch.max(outputs.data, 1)
-        total += labels.size(0)
-        correct += (predicted == labels).sum().item()
-  return correct/total 
-def train_trajec(train_dataset,train_sampler,model,num_train,logger,optimizer,scheduler,trajec_num,epoch_num,writer):
-
-    train_dataset.train=True 
+class TrainLoop(nn.Module):
+  def __init__(self,output_dir,train_dataset,test_dataset,logger,num_trajec,num_epoch,prefix):
+   super().__init__()
+   self.output_dir = output_dir
+   self.writer = None 
+   self.train_dataset = train_dataset
+   self.test_dataset = test_dataset
+   self.logger = logger 
+   self.weights = None
+   self.trajec = num_trajec 
+   self.epochs = num_epoch
+   self.best_model_path = None 
+   self.prefix = prefix
+  def test(self):
+    correct = 0
+    total = 0
+    self.test_dataset.train=False 
+    self.test_dataset.test = True 
+    model,optim,sched = self.initialize_model(self.best_model_path,self.epochs)
+    test_loader = torch.utils.data.DataLoader(
+          self.test_dataset, batch_size=256, shuffle=True,
+          num_workers=2
+      )
+    model.cuda()
+    model.eval()
+    with torch.no_grad():
+      for data in tqdm(test_loader):
+          inputs, labels = data
+          # calculate outputs by running images through the network
+          inputs = inputs.cuda()
+          labels = labels.cuda()
+          outputs = model(inputs)
+          # the class with the highest energy is what we choose as prediction
+          _, predicted = torch.max(outputs.data, 1)
+          total += labels.size(0)
+          correct += (predicted == labels).sum().item()
+    self.logger.info(f'Acc: {correct/total}')
+    print(f'Acc:{correct/total}')
+    return correct/total 
+  def save_outer(self):
+    save_dict = {'weights':self.weights.state_dict(),'weight_optim':self.weights.optimizer.state_dict(),'weight_log_prob':self.weights.log_prob}
+    torch.save(save_dict,f'{self.prefix}/ohl_auto_aug/{self.output_dir}/outer_loop.pt')
+  def save_inner(self,trajec,epoch_num,all_augmentations,train_sampler,val_sampler,new_best_model_path,highest_reward,rewards,optim,sched):
+    save_dict = {'trajec':trajec,'epoch':epoch_num,'augmentations':all_augmentations,'train_sampler':train_sampler,'val_sampler':val_sampler,'best_model_path':self.best_model_path,
+    'new_best_model_path':new_best_model_path,'highest_reward':highest_reward,'reward_list':rewards,'optim':optim.state_dict(),'sched':sched.state_dict(),'augmentation_list':self.train_dataset.augmentation_list}
+    torch.save(save_dict,f'{self.prefix}/ohl_auto_aug/{self.output_dir}/training_loop.pt')
+  def compute_normalized_rewards(self,rewards):
+    new_rewards = []
+    mean = np.mean(rewards)
+    for i in range(len(rewards)):
+      new_rewards.append(rewards[i]-mean)
+    return new_rewards
+  def outer_train(self,resume,auto_aug):
+    if auto_aug != None:
+      auto_aug_train = True 
+    else:
+      auto_aug_train = False
+    best_model_path = None 
+    start_epoch = 0
+    if not os.path.exists(f'{self.prefix}/ohl_auto_aug/'):
+      print(f'Does not exist {self.prefix}/ohl_auto_aug/')
+      raise TypeError 
+    if not os.path.exists(f'{self.prefix}/ohl_auto_aug/{self.output_dir}/'):
+      os.makedirs(f'{self.prefix}/ohl_auto_aug/{self.output_dir}/')
+    if resume == None:
+      
+      clear_if_nonempty(f'{self.prefix}/ohl_auto_aug/{self.output_dir}/')
+    else:
+      inner_dict = torch.load(f'{self.prefix}/ohl_auto_aug/{self.output_dir}/training_loop.pt')
+      outer_dict = torch.load(f'{self.prefix}/ohl_auto_aug/{self.output_dir}/outer_loop.pt')
+      start_epoch = inner_dict['epoch']  
+    if not os.path.exists(f'{self.prefix}/ohl_auto_aug/{self.output_dir}/tensorboard'):
+      os.makedirs(f'{self.output_dir}/ohl_auto_aug/outputs/tensorboard')
+    self.weights = Weights(36*36,256)
+    if resume != None:
+      self.weights.load_state_dict(outer_dict['weights'])
+    for i in range(start_epoch,self.epochs):
+      #summary_writer.add_scalar('average_weight',w.weights.mean(),i)
+      if resume != None and i<=start_epoch:
+        self.train_dataset.augmentation_list = inner_dict['augmentation_list']
+        rewards= self.train_epoch(i,inner_dict=inner_dict,resume=True)
+      else:
+        rewards = self.train_epoch(i)
+      normalized_rewards = self.compute_normalized_validation(rewards)
+      self.writer.add_scalar('average weight',torch.mean(self.weights.weights),i)
+      avg = torch.mean(self.weights.weights).item()
+      self.logger.info(f'Average weight is {avg}')
+      self.weights.update(normalized_rewards)
+      self.save_outer(self.weights)
+   
+    self.test()
+  def train_trajec(self,train_sampler,model,optimizer,scheduler,trajec_num,epoch_num):
+    self.train_dataset.train=True 
     train_loader = torch.utils.data.DataLoader(
-        train_dataset, batch_size=256, sampler=train_sampler,
+        self.train_dataset, batch_size=256, sampler=train_sampler,
         num_workers=4
     )
     model = model.cuda()
     model.train()
     pbar = tqdm(train_loader, ncols=100, desc="loss=", total=len(train_loader))
-    criterion = nn.CrossEntropyLoss()
-    
-    #print(sched.state_dict())   
+    criterion = nn.CrossEntropyLoss()  
     running_loss = 0
     for i, data in enumerate(pbar):
         # get the inputs; data is a list of [inputs, labels]
@@ -202,182 +242,307 @@ def train_trajec(train_dataset,train_sampler,model,num_train,logger,optimizer,sc
 
         running_loss += loss.item()
         if i%100 == 0 and i>0:
-          logger.info(f'Loss is {running_loss/i}')
-          writer.add_scalar(f'loss_trajec_{trajec_num}_epoch_{epoch_num}',running_loss/i,i)
-
-        # print statistics
-        
-        # if i % 2000 == 1999:    # print every 2000 mini-batches
-        #     print(f'[{epoch + 1}, {i + 1:5d}] loss: {running_loss / 2000:.3f}')
-        #     running_loss = 0.0
-    writer.add_scalar(f'loss_trajec_{trajec_num}_epoch_{epoch_num}',running_loss/len(pbar),len(pbar))
-
+          self.logger.info(f'Loss is {running_loss/i}')
+          self.writer.add_scalar(f'loss_trajec_{trajec_num}_epoch_{epoch_num}',running_loss/i,i)
+    self.writer.add_scalar(f'loss_trajec_{trajec_num}_epoch_{epoch_num}',running_loss/len(pbar),len(pbar))
     return model,optimizer,scheduler
-def initialize_model(best_model_path,epoch_num):
+  def save_best_model(self,model,optimizer,scheduler,epoch,end_of_epoch=False):
   
-  model = torch.hub.load('pytorch/vision:v0.10.0', 'resnet18', pretrained=False)
-  model.to("cuda:0")
-  optimizer = optim.SGD(model.parameters(), lr=0.2, momentum=0.9,weight_decay=.0005)
-  sched = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, int(300))
-  
-  if epoch_num>0:
-    state_dict = torch.load('/home/michal/ohl_auto_aug/outputs/best_model.pt',map_location="cuda:0") 
-    model.load_state_dict(state_dict['model'])
-    optimizer.load_state_dict(state_dict['optimizer'])
-   
-    sched.load_state_dict(state_dict['scheduler'])
-    print(sched.get_last_lr(),'last lr')
-  return model,optimizer,sched 
-def save_best_model(model,optimizer,scheduler,epoch,end_of_epoch=False):
-  
-  if end_of_epoch:
-    state_dict = torch.load('/home/michal/ohl_auto_aug/outputs/temp_model.pt',map_location="cuda:0")
-    model.load_state_dict(state_dict['model'])
-    optimizer.load_state_dict(state_dict['optimizer'])
-    scheduler.load_state_dict(state_dict['scheduler'])
-    scheduler.step()
-    state_dict = {'model':model.state_dict(),'optimizer':optimizer.state_dict(),'scheduler':scheduler.state_dict(),'epoch':epoch}
-    torch.save(state_dict,'/home/michal/ohl_auto_aug/outputs/best_model.pt')
-  else:
-    state_dict = {'model':model.state_dict(),'optimizer':optimizer.state_dict(),'scheduler':scheduler.state_dict(),'epoch':epoch}
-    torch.save(state_dict,'/home/michal/ohl_auto_aug/outputs/temp_model.pt')
+    if end_of_epoch:
+      state_dict = torch.load(f'{self.prefix}/ohl_auto_aug/{self.output_dir}/temp_model.pt',map_location="cuda:0")
+      model.load_state_dict(state_dict['model'])
+      optimizer.load_state_dict(state_dict['optimizer'])
+      scheduler.load_state_dict(state_dict['scheduler'])
+      scheduler.step()
+      state_dict = {'model':model.state_dict(),'optimizer':optimizer.state_dict(),'scheduler':scheduler.state_dict(),'epoch':epoch}
+      torch.save(state_dict,f'{self.prefix}/ohl_auto_aug/{self.output_dir}/best_model.pt')
+    else:
+      state_dict = {'model':model.state_dict(),'optimizer':optimizer.state_dict(),'scheduler':scheduler.state_dict(),'epoch':epoch}
+      torch.save(state_dict,f'{self.prefix}/ohl_auto_aug/{self.output_dir}/temp_model.pt')
     
 
-def train_epoch(weights,best_model_path,highest_reward,epoch_num,logger,cifar_10,writer,inner_dict=None,resume=False):
+  def val_trajec(self,val_sampler,model):
+    correct = 0
+    total = 0
+    self.train_dataset.train=False 
+    val_loader = torch.utils.data.DataLoader(
+          self.train_dataset, batch_size=256, sampler=val_sampler,
+          num_workers=2
+      )
+    model.cuda()
+    model.eval()
+    with torch.no_grad():
+      for data in val_loader:
+          inputs, labels = data
+          # calculate outputs by running images through the network
+          inputs = inputs.cuda()
+          labels = labels.cuda()
+          outputs = model(inputs)
+          # the class with the highest energy is what we choose as prediction
+          _, predicted = torch.max(outputs.data, 1)
+          total += labels.size(0)
+          correct += (predicted == labels).sum().item()
+    return correct/total 
+  def initialize_model(self,epoch_num):
+  
+    model = torch.hub.load('pytorch/vision:v0.10.0', 'resnet18', pretrained=False)
+    model.to("cuda:0")
+    optimizer = optim.SGD(model.parameters(), lr=0.2, momentum=0.9,weight_decay=.0005)
+    sched = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, int(self.epochs))
+    
+    if epoch_num>0:
+      state_dict = torch.load(f'{self.prefix}/ohl_auto_aug/{self.output_dir}/best_model.pt',map_location="cuda:0") 
+      model.load_state_dict(state_dict['model'])
+      optimizer.load_state_dict(state_dict['optimizer'])
+    
+      sched.load_state_dict(state_dict['scheduler'])
+      print(sched.get_last_lr(),'last lr')
+    return model,optimizer,sched 
+  def train_epoch(self,epoch_num,inner_dict=None,resume=False):
     best_model = None 
-    
     if resume == False:
-
       rewards = []
-
-      train_sampler,val_sampler,num_train = cifar_10.get_samplers()
+      train_sampler,val_sampler,num_train = self.train_dataset.get_samplers()
       new_best_model_path = None
       highest_reward = -1
       start_trajec = 0
       weights_step = 0
       train_step = 0 
     else:
-
       rewards = inner_dict['reward_list']
       train_sampler = inner_dict['train_sampler']
-
       val_sampler = inner_dict['val_sampler']
       num_train = 45000
       new_best_model_path = inner_dict['new_best_model_path']
       highest_reward = inner_dict['highest_reward']
       start_trajec = inner_dict['trajec']
-    
-
-
-    
-
-
-
-
-  
-    for trajec in range(start_trajec,8):
-        logger.info(f'Trajec {trajec} for epoch {epoch_num}')
+    for trajec in range(start_trajec,self.trajec):
+        self.logger.info(f'Trajec {trajec} for epoch {epoch_num}')
         all_augmentations = {}
         aug_list = []
         for v in train_sampler.indices:
           all_augmentations[v] = None
-
-        model,optimizer,scheduler= initialize_model(best_model_path,epoch_num)
-        
-
-        num_samples = 45000/256
-        sampled_augs = weights.sample(45000)
+        model,optimizer,scheduler= self.initialize_model(epoch_num)  
+        sampled_augs = self.weights.sample(45000)
         for a in sampled_augs:
-          aug_list.append(a)
-       
+          aug_list.append(a)     
         for i,v in enumerate(all_augmentations.keys()):
           all_augmentations[v] = aug_list[i]
-
-        # print(len(all_augmentations),num_train)
-        # assert len(all_augmentations) >= num_train
-        cifar_10.augmentations = all_augmentations
-        trained_model,optimizer,scheduler = train_trajec(cifar_10,train_sampler,model,num_train,logger,optimizer,scheduler,trajec,epoch_num,writer)
-        reward = val_trajec(cifar_10,val_sampler,trained_model)
-        logger.info(f'Reward for trajec {trajec} is {reward}')
+        self.train_dataset.augmentations = all_augmentations
+        trained_model,optimizer,scheduler = self.train_trajec(train_sampler,model,optimizer,scheduler,i,epoch_num)
+        reward = self.val_trajec(val_sampler,trained_model)
+        self.logger.info(f'Reward for trajec {trajec} is {reward}')
         rewards.append(reward)
-        writer.add_scalar(f'rewards_epoch_{epoch_num}',reward,trajec)
+        self.writer.add_scalar(f'rewards_epoch_{epoch_num}',reward,trajec)
         if reward > highest_reward:
-          save_best_model(model,optimizer,scheduler,epoch_num)
-          #scheduler.step()
-          # state_dict = {'model':model.state_dict(),'optim':optimizer.state_dict(),'sched':scheduler.state_dict(),'epoch':epoch_num,'trajec':trajec}
-          # torch.save(state_dict,f'/home/michal/ohl_auto_aug/outputs/temp_model.pt')
-          #new_best_model_path = f'/home/michal/ohl_auto_aug/outputs/best_model.pt'
-          
+          self.save_best_model(model,optimizer,scheduler,epoch_num)
           highest_reward =reward 
-        save_inner(trajec,epoch_num,all_augmentations,train_sampler,val_sampler,best_model_path,new_best_model_path,highest_reward,rewards,optimizer,scheduler,cifar_10)
-    writer.add_scalar(f'highest_reward',highest_reward,epoch_num)
-    best_model_path = new_best_model_path
-    save_best_model(model,optimizer,scheduler,epoch_num,end_of_epoch=True)
-    return rewards,best_model_path,highest_reward,cifar_10
-def save_inner(trajec,epoch_num,all_augmentations,train_sampler,val_sampler,best_model_path,new_best_model_path,highest_reward,rewards,optim,sched,cifar_10):
-    save_dict = {'trajec':trajec,'epoch':epoch_num,'augmentations':all_augmentations,'train_sampler':train_sampler,'val_sampler':val_sampler,'best_model_path':best_model_path,
-    'new_best_model_path':new_best_model_path,'highest_reward':highest_reward,'reward_list':rewards,'optim':optim.state_dict(),'sched':sched.state_dict(),'augmentation_list':cifar_10.augmentation_list}
-    torch.save(save_dict,'/home/michal/ohl_auto_aug/outputs/training_loop.pt')
-def save_outer(weights):
-    save_dict = {'weights':weights.state_dict(),'weight_optim':weights.optimizer.state_dict(),'weight_log_prob':weights.log_prob}
-    torch.save(save_dict,'/home/michal/ohl_auto_aug/outputs/outer_loop.pt')
-def compute_normalized_validation(rewards):
-    new_rewards = []
-    mean = np.mean(rewards)
-    for i in range(len(rewards)):
-      new_rewards.append(rewards[i]-mean)
-    return new_rewards
-        #sample 2 times for every image (2 times 45,000)
-        #apply 
+        self.save_inner(trajec,epoch_num,all_augmentations,train_sampler,val_sampler,self.best_model_path,new_best_model_path,highest_reward,rewards,optimizer,scheduler,self.train_dataset)
+    self.writer.add_scalar(f'highest_reward',highest_reward,epoch_num)
+    self.best_model_path = new_best_model_path
+    self.save_best_model(model,optimizer,scheduler,epoch_num,end_of_epoch=True)
+    return rewards
+
+
+# def test(dataset,best_model_path,logger):
+#   correct = 0
+#   total = 0
+#   dataset.train=False 
+#   dataset.test = True 
+#   model,optim,sched = initialize_model(best_model_path,300)
+#   test_loader = torch.utils.data.DataLoader(
+#         dataset, batch_size=256, shuffle=True,
+#         num_workers=2
+#     )
+#   model.cuda()
+#   model.eval()
+#   with torch.no_grad():
+#     for data in tqdm(test_loader):
+#         inputs, labels = data
+#         # calculate outputs by running images through the network
+#         inputs = inputs.cuda()
+#         labels = labels.cuda()
+#         outputs = model(inputs)
+#         # the class with the highest energy is what we choose as prediction
+#         _, predicted = torch.max(outputs.data, 1)
+#         total += labels.size(0)
+#         correct += (predicted == labels).sum().item()
+#   logger.info(f'Acc: {correct/total}')
+#   print(f'Acc:{correct/total}')
+#   return correct/total 
+# def val_trajec(dataset,val_sampler,model):
+#   correct = 0
+#   total = 0
+#   dataset.train=False 
+#   val_loader = torch.utils.data.DataLoader(
+#         dataset, batch_size=256, sampler=val_sampler,
+#         num_workers=2
+#     )
+#   model.cuda()
+#   model.eval()
+#   with torch.no_grad():
+#     for data in val_loader:
+#         inputs, labels = data
+#         # calculate outputs by running images through the network
+#         inputs = inputs.cuda()
+#         labels = labels.cuda()
+#         outputs = model(inputs)
+#         # the class with the highest energy is what we choose as prediction
+#         _, predicted = torch.max(outputs.data, 1)
+#         total += labels.size(0)
+#         correct += (predicted == labels).sum().item()
+#   return correct/total 
+# def train_trajec(train_dataset,train_sampler,model,num_train,logger,optimizer,scheduler,trajec_num,epoch_num,writer):
+
+#     train_dataset.train=True 
+#     train_loader = torch.utils.data.DataLoader(
+#         train_dataset, batch_size=256, sampler=train_sampler,
+#         num_workers=4
+#     )
+#     model = model.cuda()
+#     model.train()
+#     pbar = tqdm(train_loader, ncols=100, desc="loss=", total=len(train_loader))
+#     criterion = nn.CrossEntropyLoss()
+    
+#     #print(sched.state_dict())   
+#     running_loss = 0
+#     for i, data in enumerate(pbar):
+#         # get the inputs; data is a list of [inputs, labels]
+#         inputs, labels = data
+#         inputs = inputs.cuda()
+#         labels = labels.cuda()
+#         # zero the parameter gradients
+#         optimizer.zero_grad()
+
+#         # forward + backward + optimize
+#         outputs = model(inputs)
+#         loss = criterion(outputs, labels)
+#         loss.backward()
+#         optimizer.step()
+       
+
+#         running_loss += loss.item()
+#         if i%100 == 0 and i>0:
+#           logger.info(f'Loss is {running_loss/i}')
+#           writer.add_scalar(f'loss_trajec_{trajec_num}_epoch_{epoch_num}',running_loss/i,i)
+
+#         # print statistics
+        
+#         # if i % 2000 == 1999:    # print every 2000 mini-batches
+#         #     print(f'[{epoch + 1}, {i + 1:5d}] loss: {running_loss / 2000:.3f}')
+#         #     running_loss = 0.0
+#     writer.add_scalar(f'loss_trajec_{trajec_num}_epoch_{epoch_num}',running_loss/len(pbar),len(pbar))
+
+#     return model,optimizer,scheduler
+# def initialize_model(best_model_path,epoch_num):
+  
+#   model = torch.hub.load('pytorch/vision:v0.10.0', 'resnet18', pretrained=False)
+#   model.to("cuda:0")
+#   optimizer = optim.SGD(model.parameters(), lr=0.2, momentum=0.9,weight_decay=.0005)
+#   sched = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, int(300))
+  
+#   if epoch_num>0:
+#     state_dict = torch.load('/home/michal5/ohl_auto_aug/outputs/best_model.pt',map_location="cuda:0") 
+#     model.load_state_dict(state_dict['model'])
+#     optimizer.load_state_dict(state_dict['optimizer'])
+   
+#     sched.load_state_dict(state_dict['scheduler'])
+#     print(sched.get_last_lr(),'last lr')
+#   return model,optimizer,sched 
+# def save_best_model(model,optimizer,scheduler,epoch,end_of_epoch=False):
+  
+#   if end_of_epoch:
+#     state_dict = torch.load('/home/michal5/ohl_auto_aug/outputs/temp_model.pt',map_location="cuda:0")
+#     model.load_state_dict(state_dict['model'])
+#     optimizer.load_state_dict(state_dict['optimizer'])
+#     scheduler.load_state_dict(state_dict['scheduler'])
+#     scheduler.step()
+#     state_dict = {'model':model.state_dict(),'optimizer':optimizer.state_dict(),'scheduler':scheduler.state_dict(),'epoch':epoch}
+#     torch.save(state_dict,'/home/michal5/ohl_auto_aug/outputs/best_model.pt')
+#   else:
+#     state_dict = {'model':model.state_dict(),'optimizer':optimizer.state_dict(),'scheduler':scheduler.state_dict(),'epoch':epoch}
+#     torch.save(state_dict,'/home/michal5/ohl_auto_aug/outputs/temp_model.pt')
+    
+
+
+# def save_inner(trajec,epoch_num,all_augmentations,train_sampler,val_sampler,best_model_path,new_best_model_path,highest_reward,rewards,optim,sched,cifar_10):
+#     save_dict = {'trajec':trajec,'epoch':epoch_num,'augmentations':all_augmentations,'train_sampler':train_sampler,'val_sampler':val_sampler,'best_model_path':best_model_path,
+#     'new_best_model_path':new_best_model_path,'highest_reward':highest_reward,'reward_list':rewards,'optim':optim.state_dict(),'sched':sched.state_dict(),'augmentation_list':cifar_10.augmentation_list}
+#     torch.save(save_dict,'/home/michal5/ohl_auto_aug/outputs/training_loop.pt')
+# def save_outer(weights):
+#     save_dict = {'weights':weights.state_dict(),'weight_optim':weights.optimizer.state_dict(),'weight_log_prob':weights.log_prob}
+#     torch.save(save_dict,'/home/michal5/ohl_auto_aug/outputs/outer_loop.pt')
+# def compute_normalized_validation(rewards):
+#     new_rewards = []
+#     mean = np.mean(rewards)
+#     for i in range(len(rewards)):
+#       new_rewards.append(rewards[i]-mean)
+#     return new_rewards
+#         #sample 2 times for every image (2 times 45,000)
+#         #apply 
 
 
 def main():
     parser = ArgumentParser()
     parser.add_argument("--resume",type=bool,default=None )
     parser.add_argument("--auto_aug",type=bool,default=None)
-    logger = setup_logger('logger','/home/michal/ohl_auto_aug/outputs/log_file.log')
+    parser.add_argument("--prefix",type=str,default=None)
+    parser.add_argument("--output_dir",type=str,default=None)
+    parser.add_argument("--trajec",type=int,default=8)
+    parser.add_argument("--epoch",type=int,default=300)
     args = parser.parse_args()
+    if not os.path.exists(f'{args.prefix}/ohl_auto_aug'):
+      print(f'{args.prefix}/ohl_auto_aug does not exist')
+      raise TypeError
+    if not os.path.exists(f'{args.prefix}/ohl_auto_aug/{args.output_dir}'):
+      os.makedirs(f'{args.prefix}/ohl_auto_aug/{args.output_dir}')
+    logger = setup_logger('logger',f'{args.prefix}/ohl_auto_aug/{args.output_dir}/log_file.log')
     if args.auto_aug != None:
       auto_aug = True 
     else:
       auto_aug = False
     highest_reward = -1 
-    cifar_10 = CIFAR10(train=True,auto_aug=auto_aug)
+    cifar_10_train = CIFAR10(train=True,auto_aug=auto_aug)
+    cifar_10_test = CIFAR10Test(train=False,test=True)
     logger.info(f'Auto augmentation is {auto_aug}')
-    best_model_path = None 
-    start_epoch = 0
-    if args.resume == None:
+    loop = TrainLoop(args.output_dir,cifar_10_train,cifar_10_test,logger,int(args.trajec),int(args.epoch),args.prefix)
+    loop.outer_train(args.resume,auto_aug)
+    #output_dir,train_dataset,test_dataset,logger,num_trajec,num_epoch,prefix):
+    
+    # best_model_path = None 
+    # start_epoch = 0
+    # if args.resume == None:
       
-      clear_if_nonempty('/home/michal/ohl_auto_aug/outputs/')
-    else:
-      inner_dict = torch.load('/home/michal/ohl_auto_aug/outputs/training_loop.pt')
-      outer_dict = torch.load('/home/michal/ohl_auto_aug/outputs/outer_loop.pt')
-      start_epoch = inner_dict['epoch']
+    #   clear_if_nonempty('/home/michal5/ohl_auto_aug/outputs/')
+    # else:
+    #   inner_dict = torch.load('/home/michal5/ohl_auto_aug/outputs/training_loop.pt')
+    #   outer_dict = torch.load('/home/michal5/ohl_auto_aug/outputs/outer_loop.pt')
+    #   start_epoch = inner_dict['epoch']
   
     
-    if not os.path.exists('/home/michal/ohl_auto_aug/outputs/tensorboard'):
-      os.makedirs('/home/michal/ohl_auto_aug/outputs/tensorboard')
-    summary_writer = SummaryWriter('/home/michal/ohl_auto_aug/outputs/tensorboard')
-    w = Weights(36*36,256)
-    if args.resume != None:
+    # if not os.path.exists('/home/michal5/ohl_auto_aug/outputs/tensorboard'):
+    #   os.makedirs('/home/michal5/ohl_auto_aug/outputs/tensorboard')
+    # summary_writer = SummaryWriter('/home/michal5/ohl_auto_aug/outputs/tensorboard')
+    # w = Weights(36*36,256)
+    # if args.resume != None:
 
-      w.load_state_dict(outer_dict['weights'])
+    #   w.load_state_dict(outer_dict['weights'])
 
-    for i in range(start_epoch,300):
-      #summary_writer.add_scalar('average_weight',w.weights.mean(),i)
-      if args.resume != None and i<=start_epoch:
-        cifar_10.augmentation_list = inner_dict['augmentation_list']
-        rewards,best_model_path,highest_reward,dataset = train_epoch(w,best_model_path,highest_reward,i,logger,cifar_10,summary_writer,inner_dict=inner_dict,resume=True)
-      else:
-        rewards,best_model_path,highest_reward,dataset = train_epoch(w,best_model_path,highest_reward,i,logger,cifar_10,summary_writer)
-      normalized_rewards = compute_normalized_validation(rewards)
-      summary_writer.add_scalar('average weight',torch.mean(w.weights),i)
-      avg = torch.mean(w.weights).item()
-      logger.info(f'Average weight is {avg}')
-      w.update(normalized_rewards)
-      save_outer(w,)
-    cifar_10_test = CIFAR10Test(train=False,test=True)
-    test(cifar_10_test,best_model_path,logger)
+    # for i in range(start_epoch,300):
+    #   #summary_writer.add_scalar('average_weight',w.weights.mean(),i)
+    #   if args.resume != None and i<=start_epoch:
+    #     cifar_10.augmentation_list = inner_dict['augmentation_list']
+    #     rewards,best_model_path,highest_reward,dataset = train_epoch(w,best_model_path,highest_reward,i,logger,cifar_10,summary_writer,inner_dict=inner_dict,resume=True)
+    #   else:
+    #     rewards,best_model_path,highest_reward,dataset = train_epoch(w,best_model_path,highest_reward,i,logger,cifar_10,summary_writer)
+    #   normalized_rewards = compute_normalized_validation(rewards)
+    #   summary_writer.add_scalar('average weight',torch.mean(w.weights),i)
+    #   avg = torch.mean(w.weights).item()
+    #   logger.info(f'Average weight is {avg}')
+    #   w.update(normalized_rewards)
+    #   save_outer(w,)
+    # cifar_10_test = CIFAR10Test(train=False,test=True)
+    # test(cifar_10_test,best_model_path,logger)
     
       
     
