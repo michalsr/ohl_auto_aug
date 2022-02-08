@@ -15,6 +15,8 @@ from tqdm import tqdm
 import numpy as np 
 import pdb 
 import sys
+from resnet import ResNet18
+from scheduler import WarmupCosineLR
 def get_yes_no(msg):
   while True:
     txt = input(msg).strip().lower()
@@ -74,7 +76,7 @@ class Weights(nn.Module):
       lessons.append(lesson_1.item())
   
       sample_log_probs = torch.add(sample_log_probs,dist.log_prob(lesson_1))
-    print(sample_log_probs,'sample log probs') 
+ 
     self.log_prob.append(sample_log_probs)
     #print(self.log_prob,'after sampl')
     #print(trajec,len(self.log_prob))
@@ -109,7 +111,7 @@ class Weights(nn.Module):
     # for v in loss_values:
     #   print(type(v),v.requires_grad)
     self.optimizer.zero_grad()
-    print(loss_values,'loss values')
+
     loss_values_f = torch.stack(loss_values)
     loss = loss_values_f.mean()
     print(f'Outer loss is {loss} ')
@@ -141,12 +143,11 @@ class TrainLoop(nn.Module):
     total = 0
     self.test_dataset.train=False 
     self.test_dataset.test = True 
-    model,optim,sched = self.initialize_model(self.best_model_path,self.epochs)
+    model,optim,sched = self.initialize_model(self.epochs)
     test_loader = torch.utils.data.DataLoader(
-          self.test_dataset, batch_size=256, shuffle=True,
-          num_workers=2
+          self.test_dataset, batch_size=100, shuffle=False,num_workers=4
       )
-    model.cuda()
+    model = model.cuda()
     model.eval()
     with torch.no_grad():
       for data in tqdm(test_loader):
@@ -165,9 +166,9 @@ class TrainLoop(nn.Module):
   def save_outer(self):
     save_dict = {'weights':self.weights.state_dict(),'weight_optim':self.weights.optimizer.state_dict(),'weight_log_prob':self.weights.log_prob}
     torch.save(save_dict,f'{self.prefix}/ohl_auto_aug/{self.output_dir}/outer_loop.pt')
-  def save_inner(self,trajec,epoch_num,all_augmentations,train_sampler,val_sampler,new_best_model_path,highest_reward,rewards,optim,sched):
+  def save_inner(self,trajec,epoch_num,all_augmentations,train_sampler,val_sampler,new_best_model_path,highest_reward,rewards,optimizer,sched):
     save_dict = {'trajec':trajec,'epoch':epoch_num,'augmentations':all_augmentations,'train_sampler':train_sampler,'val_sampler':val_sampler,'best_model_path':self.best_model_path,
-    'new_best_model_path':new_best_model_path,'highest_reward':highest_reward,'reward_list':rewards,'optim':optim.state_dict(),'sched':sched.state_dict(),'augmentation_list':self.train_dataset.augmentation_list}
+    'new_best_model_path':new_best_model_path,'highest_reward':highest_reward,'reward_list':rewards,'optim':optimizer.state_dict(),'sched':sched.state_dict(),'augmentation_list':self.train_dataset.augmentation_list}
     torch.save(save_dict,f'{self.prefix}/ohl_auto_aug/{self.output_dir}/training_loop.pt')
   def compute_normalized_rewards(self,rewards):
     new_rewards = []
@@ -176,6 +177,7 @@ class TrainLoop(nn.Module):
       new_rewards.append(rewards[i]-mean)
     return new_rewards
   def outer_train(self,resume,auto_aug):
+
     if auto_aug != None:
       auto_aug_train = True 
     else:
@@ -195,7 +197,8 @@ class TrainLoop(nn.Module):
       outer_dict = torch.load(f'{self.prefix}/ohl_auto_aug/{self.output_dir}/outer_loop.pt')
       start_epoch = inner_dict['epoch']  
     if not os.path.exists(f'{self.prefix}/ohl_auto_aug/{self.output_dir}/tensorboard'):
-      os.makedirs(f'{self.output_dir}/ohl_auto_aug/outputs/tensorboard')
+      os.makedirs(f'{self.prefix}/ohl_auto_aug/{self.output_dir}/tensorboard')
+    self.writer = SummaryWriter(f'{self.output_dir}/ohl_auto_aug/outputs/tensorboard')
     self.weights = Weights(36*36,256)
     if resume != None:
       self.weights.load_state_dict(outer_dict['weights'])
@@ -206,26 +209,30 @@ class TrainLoop(nn.Module):
         rewards= self.train_epoch(i,inner_dict=inner_dict,resume=True)
       else:
         rewards = self.train_epoch(i)
-      normalized_rewards = self.compute_normalized_validation(rewards)
+      normalized_rewards = self.compute_normalized_rewards(rewards)
       self.writer.add_scalar('average weight',torch.mean(self.weights.weights),i)
       avg = torch.mean(self.weights.weights).item()
       self.logger.info(f'Average weight is {avg}')
       self.weights.update(normalized_rewards)
-      self.save_outer(self.weights)
+      self.save_outer()
    
     self.test()
   def train_trajec(self,train_sampler,model,optimizer,scheduler,trajec_num,epoch_num):
+    
     self.train_dataset.train=True 
     train_loader = torch.utils.data.DataLoader(
-        self.train_dataset, batch_size=256, sampler=train_sampler,
+        self.train_dataset, batch_size=256, shuffle=True,
         num_workers=4
     )
     model = model.cuda()
     model.train()
-    pbar = tqdm(train_loader, ncols=100, desc="loss=", total=len(train_loader))
+ 
+    print(scheduler.get_last_lr())
+    #pbar_2 = tqdm(range(max_epochs),ncols=100,total=max_epochs)
+    pbar_1 = tqdm(train_loader, ncols=100, desc="loss=", total=len(train_loader))
     criterion = nn.CrossEntropyLoss()  
     running_loss = 0
-    for i, data in enumerate(pbar):
+    for i, data in enumerate(pbar_1):
         # get the inputs; data is a list of [inputs, labels]
         inputs, labels = data
         inputs = inputs.cuda()
@@ -234,27 +241,30 @@ class TrainLoop(nn.Module):
         optimizer.zero_grad()
 
         # forward + backward + optimize
-        outputs = model(inputs)
+        outputs =model(inputs)
         loss = criterion(outputs, labels)
         loss.backward()
         optimizer.step()
-       
+      
 
         running_loss += loss.item()
         if i%100 == 0 and i>0:
           self.logger.info(f'Loss is {running_loss/i}')
           self.writer.add_scalar(f'loss_trajec_{trajec_num}_epoch_{epoch_num}',running_loss/i,i)
-    self.writer.add_scalar(f'loss_trajec_{trajec_num}_epoch_{epoch_num}',running_loss/len(pbar),len(pbar))
+    self.writer.add_scalar(f'loss_trajec_{trajec_num}_epoch_{epoch_num}',running_loss/len(pbar_1),len(pbar_1))
+      
+     
     return model,optimizer,scheduler
   def save_best_model(self,model,optimizer,scheduler,epoch,end_of_epoch=False):
   
     if end_of_epoch:
-      state_dict = torch.load(f'{self.prefix}/ohl_auto_aug/{self.output_dir}/temp_model.pt',map_location="cuda:0")
-      model.load_state_dict(state_dict['model'])
-      optimizer.load_state_dict(state_dict['optimizer'])
-      scheduler.load_state_dict(state_dict['scheduler'])
+      #os.rename(f'{self.prefix}/ohl_auto_aug/{self.output_dir}/temp_model.pt',f'{self.prefix}/ohl_auto_aug/{self.output_dir}/best_model.pt')
+      old_state_dict = torch.load(f'{self.prefix}/ohl_auto_aug/{self.output_dir}/temp_model.pt',map_location="cuda:0")
+      #model.load_state_dict(old_state_dict['model'])
+      #optimizer.load_state_dict(state_dict['optimizer'])
+      scheduler.load_state_dict(old_state_dict['scheduler'])
       scheduler.step()
-      state_dict = {'model':model.state_dict(),'optimizer':optimizer.state_dict(),'scheduler':scheduler.state_dict(),'epoch':epoch}
+      state_dict = {'model':old_state_dict['model'],'optimizer':old_state_dict['optimizer'],'scheduler':scheduler.state_dict(),'epoch':epoch}
       torch.save(state_dict,f'{self.prefix}/ohl_auto_aug/{self.output_dir}/best_model.pt')
     else:
       state_dict = {'model':model.state_dict(),'optimizer':optimizer.state_dict(),'scheduler':scheduler.state_dict(),'epoch':epoch}
@@ -266,10 +276,10 @@ class TrainLoop(nn.Module):
     total = 0
     self.train_dataset.train=False 
     val_loader = torch.utils.data.DataLoader(
-          self.train_dataset, batch_size=256, sampler=val_sampler,
-          num_workers=2
+          self.train_dataset, batch_size=100, sampler=val_sampler,
+          num_workers=4
       )
-    model.cuda()
+    model = model.cuda()
     model.eval()
     with torch.no_grad():
       for data in val_loader:
@@ -285,22 +295,25 @@ class TrainLoop(nn.Module):
     return correct/total 
   def initialize_model(self,epoch_num):
   
-    model = torch.hub.load('pytorch/vision:v0.10.0', 'resnet18', pretrained=False)
+    model = ResNet18()
+    model.fc = nn.Linear(512,10)
     model.to("cuda:0")
-    optimizer = optim.SGD(model.parameters(), lr=0.2, momentum=0.9,weight_decay=.0005)
-    sched = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, int(self.epochs))
-    
+    optimizer = optim.SGD(model.parameters(), lr=0.2, momentum=0.9, weight_decay=5e-4)
+    scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer,int(300))
+            
     if epoch_num>0:
+      print('Initializing from old model')
       state_dict = torch.load(f'{self.prefix}/ohl_auto_aug/{self.output_dir}/best_model.pt',map_location="cuda:0") 
       model.load_state_dict(state_dict['model'])
       optimizer.load_state_dict(state_dict['optimizer'])
-    
-      sched.load_state_dict(state_dict['scheduler'])
-      print(sched.get_last_lr(),'last lr')
-    return model,optimizer,sched 
+      scheduler.load_state_dict(state_dict['scheduler'])
+ 
+    return model,optimizer,scheduler
   def train_epoch(self,epoch_num,inner_dict=None,resume=False):
-    best_model = None 
+    #pdb.set_trace()
+
     if resume == False:
+      print('hello')
       rewards = []
       train_sampler,val_sampler,num_train = self.train_dataset.get_samplers()
       new_best_model_path = None
@@ -316,31 +329,33 @@ class TrainLoop(nn.Module):
       new_best_model_path = inner_dict['new_best_model_path']
       highest_reward = inner_dict['highest_reward']
       start_trajec = inner_dict['trajec']
+     
     for trajec in range(start_trajec,self.trajec):
         self.logger.info(f'Trajec {trajec} for epoch {epoch_num}')
         all_augmentations = {}
         aug_list = []
-        for v in train_sampler.indices:
+        for v in range(50000):
           all_augmentations[v] = None
         model,optimizer,scheduler= self.initialize_model(epoch_num)  
-        sampled_augs = self.weights.sample(45000)
+        sampled_augs = self.weights.sample(50000)
         for a in sampled_augs:
           aug_list.append(a)     
         for i,v in enumerate(all_augmentations.keys()):
           all_augmentations[v] = aug_list[i]
         self.train_dataset.augmentations = all_augmentations
-        trained_model,optimizer,scheduler = self.train_trajec(train_sampler,model,optimizer,scheduler,i,epoch_num)
+        print(self.train_dataset.auto_aug,'auto aug')
+        trained_model,optimizer,scheduler = self.train_trajec(train_sampler,model,optimizer,scheduler,trajec,epoch_num)
         reward = self.val_trajec(val_sampler,trained_model)
         self.logger.info(f'Reward for trajec {trajec} is {reward}')
         rewards.append(reward)
         self.writer.add_scalar(f'rewards_epoch_{epoch_num}',reward,trajec)
         if reward > highest_reward:
-          self.save_best_model(model,optimizer,scheduler,epoch_num)
+          self.save_best_model(trained_model,optimizer,scheduler,epoch_num)
           highest_reward =reward 
-        self.save_inner(trajec,epoch_num,all_augmentations,train_sampler,val_sampler,self.best_model_path,new_best_model_path,highest_reward,rewards,optimizer,scheduler,self.train_dataset)
+    self.save_inner(trajec,epoch_num,all_augmentations,train_sampler,val_sampler,new_best_model_path,highest_reward,rewards,optimizer,scheduler)
     self.writer.add_scalar(f'highest_reward',highest_reward,epoch_num)
     self.best_model_path = new_best_model_path
-    self.save_best_model(model,optimizer,scheduler,epoch_num,end_of_epoch=True)
+    self.save_best_model(trained_model,optimizer,scheduler,epoch_num,end_of_epoch=True)
     return rewards
 
 
@@ -502,11 +517,13 @@ def main():
     else:
       auto_aug = False
     highest_reward = -1 
-    cifar_10_train = CIFAR10(train=True,auto_aug=auto_aug)
-    cifar_10_test = CIFAR10Test(train=False,test=True)
+
+    cifar_10_train = CIFAR10(train=True,auto_aug=auto_aug,prefix=args.prefix)
+    cifar_10_test = CIFAR10Test(train=False,test=True,prefix=args.prefix)
     logger.info(f'Auto augmentation is {auto_aug}')
     loop = TrainLoop(args.output_dir,cifar_10_train,cifar_10_test,logger,int(args.trajec),int(args.epoch),args.prefix)
     loop.outer_train(args.resume,auto_aug)
+   
     #output_dir,train_dataset,test_dataset,logger,num_trajec,num_epoch,prefix):
     
     # best_model_path = None 

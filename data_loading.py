@@ -25,7 +25,7 @@ def unpickle(file):
 
 class CIFAR10(data.Dataset):
     folder = ''
-    def __init__(self,train=True,augmentations=None,test=False,auto_aug=True):
+    def __init__(self,train=True,augmentations=None,test=False,auto_aug=True,prefix=None):
         self.train = train
         self.test = test
         self.auto_aug = auto_aug
@@ -33,25 +33,28 @@ class CIFAR10(data.Dataset):
         self.augmentation_list = self.make_aug_dict()
         self.data = []
         self.labels = []
+        self.prefix = prefix 
+      
         
         #take 
         if not test:
             for i in range(1,6):
-                with open(f'/shared/rsaas/michal5/ohl_auto_aug/cifar-10-batches-py/data_batch_{i}', 'rb') as f:
+                with open(f'{self.prefix}/ohl_auto_aug/cifar-10-batches-py/data_batch_{i}', 'rb') as f:
                     entry = pickle.load(f, encoding='latin1')
                     self.data.append(entry['data'])
                     if 'labels' in entry:
                         self.labels.extend(entry['labels'])
         else:
-            with open(f'/home/michal/ohl_auto_aug/cifar-10-batches-py/test_batch', 'rb') as f:
+            with open(f'{self.prefix}/ohl_auto_aug/cifar-10-batches-py/test_batch', 'rb') as f:
                 entry = pickle.load(f, encoding='latin1')
                 self.data.append(entry['data'])
                 if 'labels' in entry:
                     self.labels.extend(entry['labels'])
+        
 
         self.data = np.vstack(self.data).reshape(-1, 3, 32, 32)
         self.data = self.data.transpose((0, 2, 3, 1))  # convert to HWC
-    
+      
     def get_samplers(self,valid_size=0.1):
         num_train = len(self.data)
         indices = list(range(num_train))
@@ -59,6 +62,7 @@ class CIFAR10(data.Dataset):
         train_idx, valid_idx = indices[split:], indices[:split]
         train_sampler = SubsetRandomSampler(train_idx)
         valid_sampler = SubsetRandomSampler(valid_idx)
+       
         return train_sampler,valid_sampler,train_idx
     def apply_transform(self,img,img_augs):
         #apply previous transforms 
@@ -141,26 +145,28 @@ class CIFAR10(data.Dataset):
 
 
 class CIFAR10Test(data.Dataset):
-    folder = ''
-    def __init__(self,train=True,augmentations=None,test=False,auto_aug=True):
+    def __init__(self,train=True,augmentations=None,test=False,auto_aug=True,prefix=None):
         self.train = train
         self.test = test
         self.auto_aug = auto_aug
         self.augmentations = augmentations
         self.augmentation_list = self.make_aug_dict()
+        self.prefix = prefix 
         self.data = []
         self.labels = []
         
         #take 
+        print(test,'test')
         if not test:
             for i in range(1,6):
-                with open(f'/shared/rsaas/michal5/ohl_auto_aug/cifar-10-batches-py/data_batch_{i}', 'rb') as f:
+                with open(f'{self.prefix}/ohl_auto_aug/cifar-10-batches-py/data_batch_{i}', 'rb') as f:
                     entry = pickle.load(f, encoding='latin1')
                     self.data.append(entry['data'])
                     if 'labels' in entry:
                         self.labels.extend(entry['labels'])
+            print(len(self.data),'train')
         else:
-            with open(f'/shared/rsaas/michal5/ohl_auto_aug/cifar-10-batches-py/test_batch', 'rb') as f:
+            with open(f'{self.prefix}/ohl_auto_aug/cifar-10-batches-py/test_batch', 'rb') as f:
                 entry = pickle.load(f, encoding='latin1')
                 self.data.append(entry['data'])
                 if 'labels' in entry:
@@ -168,7 +174,7 @@ class CIFAR10Test(data.Dataset):
 
         self.data = np.vstack(self.data).reshape(-1, 3, 32, 32)
         self.data = self.data.transpose((0, 2, 3, 1))  # convert to HWC
-    
+        print(len(self.data),self.test,'test')
     def get_samplers(self,valid_size=0.1):
         num_train = len(self.data)
         indices = list(range(num_train))
